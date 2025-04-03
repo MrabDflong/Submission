@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Habit Tracker</title>
+    <link rel="stylesheet" href="GHTstylesSubmission.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Grixti Habit Tracker</h1>
+        <form id="habit-form">
+            <input type="text" id="habit-name" placeholder="Enter a new habit" required>
+            <button type="submit">Add Habit</button>
+        </form>
+        <ul class="habit-list" id="habit-list">
+            <!-- Habit items are added here -->
+        </ul>
+        <button id="clear-data" style="background-color: red; color: white; margin-top: 20px;">Clear All Habits</button>
+    </div>
+    <div id="daily-summary"></div>
+    <div id="message-box" class="message"></div>
+    <div id="timestamp" class="timestamp"></div>
+
+    <div id="debug-toggle">
+        <label>
+            <input type="checkbox" id="toggle-debug" /> Debug Mode
+        </label>
+    </div>
+
+    <!-- Debug panel -->
+    <div id="debug-panel" style="margin: 10px; border: 1px solid #ccc; padding: 10px;">
+        <button id="advance-one-day">+1 Day</button>
+        <button id="advance-seven-days">+7 Days</button>
+        <button id="reset-offset">Reset Offset</button>
+        <span>Current Offset: +<strong id="offset-display">0</strong> days</span>
+    </div>
+    <!----------------------------------------------------------------------------------------------------------------------------->
+    <!----------------------------------------------------------------------------------------------------------------------------->
+    <!----------------------------------------------------------------------------------------------------------------------------->
+    <!----------------------------------------------------------------------------------------------------------------------------->
+    <script>
+        let debugMode = false;
+        let debugOffset = 0;
+
+        const toggleDebug = document.getElementById("toggle-debug");
+        const advanceOneDay = document.getElementById("advance-one-day");
+        const advanceSevenDays = document.getElementById("advance-seven-days");
+        const resetOffset = document.getElementById("reset-offset");
+        const debugPanel = document.getElementById("debug-panel");
+        let officialTime = null;
+
+        toggleDebug.addEventListener("change", (e) => {
+            debugMode = e.target.checked;
+            saveDebugState();
+            debugPanel.style.display = debugMode ? "block" : "none";
+        });
+
+        function loadDebugState() {
+            const storedMode = localStorage.getItem('debugMode');
+            const storedOffset = localStorage.getItem('debugOffset');
+            if (storedMode !== null) {
+                debugMode = (storedMode === 'true');
+            }
+            if (storedOffset !== null) {
+                debugOffset = parseInt(storedOffset, 10) || 0;
+            }
+        }
+
+        function generateHabitId() {
+            return '_' + Math.random().toString(36).substr(2, 9);
+        }
+
+
+
+        window.addEventListener('DOMContentLoaded', async () => {
+            loadDebugState();
+            toggleDebug.checked = debugMode;
+            debugPanel.style.display = debugMode ? "block" : "none";
+
+
+
+            updateOffsetDisplay();
+           
+            //Find today in YYYY-MM-DD format
+            const todayStr = new Date().toISOString().split('T')[0];
+            const storedTimezoneDate = localStorage.getItem('timezoneDate');
+            let storedTimezone = localStorage.getItem('timezone');
+
+
+            if (!storedTimezone || storedTimezoneDate !== todayStr){
+                //Show friendly UI element
+                const userAgreed = confirm("We’d like to detect your location to show local time. Do you accept?");
+                
+                //If they agree, call geolocation
+                if (userAgreed) {
+                    showMessage('Fetching local time...');
+                    navigator.geolocation.getCurrentPosition(
+                        async (position) => {
+                            const { latitude, longitude } = position.coords;
+                            await fetchLocalTimeFromCoordinates(latitude, longitude);
+                            //officialTime is set or fallback => continue normal setup
+                            localStorage.setItem('timezoneDate', todayStr);//Save timezone (not co-ords)
+                            loadHabitsAndRender();
+                            deleteMessage(0);
+                        },
+                        (err) => {
+                        console.warn('Geolocation not available; falling back to device time:', err);
+                        officialTime = new Date();
+                        localStorage.setItem('timezone', Intl.DateTimeFormat().resolvedOptions().timeZone);
+                        localStorage.setItem('timezoneDate', todayStr);
+                        showMessage('Loading habits...');
+                        loadHabitsAndRender();
+                        deleteMessage(0);
+                        }
+                    );
+                } else {
+                    officialTime = new Date();
+                    showMessage('Loading habits...');
+                    localStorage.setItem('timezone', Intl.DateTimeFormat().resolvedOptions().timeZone);
+                    localStorage.setItem('timezoneDate', todayStr);
+                    loadHabitsAndRender();
+                    deleteMessage(0);
+                }
+
+            } else {
+                console.log("Using stored timezone from today:", storedTimezone);
+                officialTime = new Date();
+                loadHabitsAndRender();
+
+            }
+            
+        });
+
+        async function fetchLocalTimeFromCoordinates(lat, lon) {
+            try {
+                const url = `https://timeapi.io/api/TimeZone/coordinate?latitude=${lat}&longitude=${lon}`;
+                const response = await fetch(url);
+                if (!response.ok) throw new Error(`Fetch failed: ${response.status}`);
+
+                const data = await response.json();
+                officialTime = new Date(data.currentLocalTime);
+                console.log('Got official local time by coords:', officialTime.toString());
+                if (data.timeZone){
+                    localStorage.setItem('timezone', data.timeZone);
+                }
+            } catch (err) {
+                console.warn('Could not fetch local time, using device time instead.', err);
+                officialTime = new Date();
+            }
+        }
+
+        
+        function loadHabitsAndRender(){
+            const storedHabits = JSON.parse(localStorage.getItem('habits')) || [];
+            console.log("Loaded from localStorage:", storedHabits);
+
+            const now = getNow();
+            const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+
+            storedHabits.forEach(h => {
+                let disable = false;
+                let finalStreak = h.streak; //Real streak
+                let finalTimestamp = h.lastClickedTimestamp;
+                let isFailed = h.isFailed || false;//Load isFailed
+                let oldStreak = h.oldStreak || null;
+                let longestStreak = h.longestStreak || 0;
+
+                //If lastClickedTimestamp is older than yesterday (they missed at least one day)
+                if (finalTimestamp !== null && finalTimestamp < (today - 24*60*60*1000)) {
+                    //Force reset streak to 0
+                    isFailed = true;//Mark habit as failed
+                    oldStreak = finalStreak;
+                    finalStreak = 0;
+                    finalTimestamp = null;
+                    
+                    //Store change in localStorage
+                    updateHabit(h.id, h.name, finalStreak, finalTimestamp, isFailed, oldStreak, longestStreak);
+                    console.log(`[Missed day] Marked as failed: ${h.name}, oldStreak=${oldStreak}, newStreak=0`);
+                }
+
+                //If lastClickedTimestamp is exactly today, disable
+                if (finalTimestamp === today){
+                    disable = true;
+                }
+
+                //Pass final values to addHabit
+                addHabit(
+                  h.name,
+                  finalStreak,
+                  finalTimestamp,
+                  disable,
+                  isFailed,
+                  { 
+                    shouldSave: false, 
+                    oldStreak, 
+                    longestStreak, 
+                    id: h.id
+                }
+                );
+            });
+
+            updateTimestamp();
+        }
+
+        function saveDebugState() {
+            localStorage.setItem('debugMode', debugMode ? 'true' : 'false');
+            localStorage.setItem('debugOffset', String(debugOffset));
+        }
+
+        function updateOffsetDisplay() {
+            const offsetDays = debugOffset / (24 * 60 * 60 * 1000);
+            const offsetDisplay = document.getElementById("offset-display");
+            offsetDisplay.textContent = offsetDays.toFixed(1);
+        }
+
+        function getNow(){
+            const baseTime = officialTime || new Date();
+
+            return debugMode ? new Date(baseTime.getTime() + debugOffset) : baseTime;
+        }
+
+        advanceOneDay.addEventListener("click", () => {
+            if (debugMode){
+                debugOffset += (24 * 60 * 60 * 1000) + 1;
+                saveDebugState();
+                updateOffsetDisplay();
+                window.location.reload();
+            }
+        });
+
+        advanceSevenDays.addEventListener("click", () => {
+            if (debugMode){
+                debugOffset += (7 * 24 * 60 * 60 * 1000) + 1;
+                saveDebugState();
+                updateOffsetDisplay();
+                window.location.reload();
+            }
+        });
+
+        resetOffset.addEventListener("click", () => {
+            if (debugMode){
+                debugOffset = 0;
+                saveDebugState();
+                updateOffsetDisplay();
+                window.location.reload();
+            }
+        });
+
+        const form = document.getElementById('habit-form');
+        const habitList = document.getElementById('habit-list');
+        const clearDataButton = document.getElementById('clear-data');
+        const messageBox = document.getElementById('message-box');
+        const timestampElement = document.getElementById('timestamp');
+
+
+        
+        function showMessage(message) {
+            messageBox.textContent = message;
+
+            //Sorting out message box
+            messageBox.style.position = 'fixed';
+            messageBox.style.top = '19%';
+            messageBox.style.left = '50%';
+            messageBox.style.bottom = '76%';
+            messageBox.style.transform = 'translateX(-50%)';
+            messageBox.style.width = 'max-content';
+            messageBox.style.height = 'auto';
+            messageBox.style.padding = '10px';
+            messageBox.style.fontSize = '1.2rem';
+            messageBox.style.backgroundColor = '#444';
+            messageBox.style.borderRadius = '5px';
+            messageBox.style.textAlign = 'center';
+            messageBox.style.zIndex = '9999';
+            messageBox.style.display = 'block';
+        }
+
+        function deleteMessage(timeLimit){
+            setTimeout(() => {
+                messageBox.style.display = 'none';
+            }, timeLimit);
+        }
+
+        function updateTimestamp() {
+            const now = getNow();
+            const formatted = now.toLocaleDateString('en-GB') + ', ' + now.toLocaleTimeString();
+            timestampElement.textContent = `Last Updated: ${formatted}`;
+        }
+
+        form.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const habitName = document.getElementById('habit-name').value;
+            if(!habitName) return;
+
+            addHabit(habitName, 0, null, false, false, { shouldSave: true });
+            document.getElementById('habit-name').value = '';
+            updateTimestamp();
+        });
+
+        clearDataButton.addEventListener('click', () => {
+            if (confirm('Are you sure you want to delete all habits?')) {
+                localStorage.clear();
+                habitList.innerHTML = '';
+                updateTimestamp();
+                updateDailySummary();
+            }
+        });
+
+        function addHabit(
+            name,
+            streakValue = 0,
+            lastClickedTimestamp = null,
+            disable = false,
+            isFailed = false,
+            { 
+                shouldSave = false,
+                oldStreak = null, //Read oldStreak from here
+                longestStreak = 0, 
+                id
+            } = {}
+            
+        ) {
+            let localId = id;
+            //Create card
+            const card = document.createElement('div');
+            card.classList.add('idle-card', 'color-green');
+
+            //Build inner HTML with left circle, middle stats, right area
+            card.innerHTML = `
+                <!-- Left circle with current streak inside -->
+                <div class="idle-card-circle">
+                    <span>${streakValue}</span>
+                </div>
+
+                <!-- Middle stats: show habit name, progress bar, etc. -->
+                <div class="idle-card-stats">
+                    <div class="idle-title"></div>
+                    <div class="idle-progress">
+                        <div class="idle-progress-bar">
+                            <div class="idle-progress-fill" style="width: 0%;"></div>
+                        </div>
+                    </div>
+                    <!-- Sub-stats or small info goes here -->
+                    <div class="idle-sub-stats">
+                        <span>Longest Streak: <span class="longest-streak">${longestStreak}</span></span>
+                    </div>
+                </div>
+
+                <!-- Right box: Mark Done button, maybe a cost or next milestone text -->
+                <div class="idle-card-upgrade">
+                    <div class="upgrade-button">
+                        <!-- Display current streak again or something else -->
+                        <div class="upgrade-cost"></div>
+                        <span>${streakValue}</span>
+                        <button>${disable ? 'Done' : 'Mark Done'}</button>
+                    </div>
+                    <!-- <div class="upgrade-cost"></div> -->
+                </div>
+            `;
+
+            //Grab references to elements needed to update in js
+            const incrementButton = card.querySelector('.upgrade-button button');
+            const streakCircleSpan = card.querySelector('.idle-card-circle span');
+            const progressFill = card.querySelector('.idle-progress-fill');
+            const streakUpgradeButton = card.querySelector('.upgrade-button span');
+            const doneButton = card.querySelector('.upgrade-button button');
+            const longestStreakSpan = card.querySelector('.longest-streak');
+            const upgradeCostDiv = card.querySelector('.upgrade-cost');
+            
+            //Set habit name via textContent rather than inner HTML
+            const habitTitle = card.querySelector('.idle-title');
+            habitTitle.textContent = name;
+
+            //If habit failed, show that in classes & text
+            if (isFailed) {
+                if (oldStreak !== null){
+                    streakCircleSpan.textContent = oldStreak;
+                }
+                upgradeCostDiv.textContent = 'FAILED';
+                upgradeCostDiv.style.color = 'red';
+                card.querySelector('.idle-card-circle').style.borderColor = 'red';
+                
+            }
+
+            if (disable && !isFailed) {
+                //If lastClickedTimestamp was today, then already done
+                incrementButton.classList.add('done');
+                incrementButton.disabled = true;
+                incrementButton.textContent = 'Done';
+                upgradeCostDiv.textContent = '';
+                card.querySelector('.idle-card-circle').style.borderColor = '';
+            }
+
+            //Create Delete button
+            const deleteBtn = document.createElement('button');
+            deleteBtn.textContent = 'Delete';
+            deleteBtn.style.backgroundColor = 'red';
+            deleteBtn.style.color = '#fff';
+            //Put below thing
+            card.querySelector('.idle-card-upgrade').appendChild(deleteBtn);
+
+            //Add event listener for incrementButton (Mark Done button)
+            /*-----------------------------------------------------------BUTTON------------------------DONE BUTTON-----------------*/
+            incrementButton.addEventListener('click', () => {
+                upgradeCostDiv.textContent = '';
+                upgradeCostDiv.style.color = '';
+                card.querySelector('.idle-card-circle').style.borderColor = '';
+
+                let isFailed = false;
+                
+                //Retrieve stored habits array or default to empty array
+                const storedHabits = JSON.parse(localStorage.getItem('habits')) || [];
+                const found = storedHabits.find(h => h.id === localId);
+                if (!found) {
+                    console.warn("No habit found for ID:", localId);
+                    return;
+                }
+
+                let currentStreak = found.streak;
+                let lastClickedTimestamp = found.lastClickedTimestamp;
+                let longestStreak = found.longestStreak;
+                
+                //Calc today's midnight
+                const now = getNow();
+                const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+
+                if (lastClickedTimestamp === today){
+                    showMessage('You can only mark this habit as done once per day.');
+                    deleteMessage(1000);
+                    return;
+                }
+
+                //Check if first time marking or last mark was exactly yesterday
+                if (lastClickedTimestamp === null) {
+                    currentStreak++;
+                    if (currentStreak > longestStreak) {
+                        longestStreak = currentStreak;
+                        longestStreakSpan.textContent = longestStreak;
+                    }
+                    updateHabit(localId, name, currentStreak, lastClickedTimestamp, isFailed, oldStreak, longestStreak);
+                    upgradeCostDiv.textContent = '';
+                    upgradeCostDiv.style.color = '';
+                    card.querySelector('.idle-card-circle').style.borderColor = '';
+                } else if (lastClickedTimestamp < today) {
+                    //If lastClickedTimestamp is from previous day, check if it was yesterday
+                    if (lastClickedTimestamp >= (today - 24 * 60 * 60 * 1000)) {
+                        //Marked yesterday = consecutive day, so increment
+                        currentStreak++;
+                        updateHabit(localId, name, currentStreak, lastClickedTimestamp, isFailed, oldStreak, longestStreak);
+                        upgradeCostDiv.textContent = '';
+                        upgradeCostDiv.style.color = '';
+                        card.querySelector('.idle-card-circle').style.borderColor = '';
+                    } else {
+                        //Last marked before yesterday = missed a day, so reset
+                        currentStreak = 0;
+                        updateHabit(localId, name, currentStreak, lastClickedTimestamp, isFailed, oldStreak, longestStreak);
+                        card.querySelector('.idle-card-circle').style.borderColor = 'red';
+                        streakUpgradeButton.textContent = streakValue; //Which is 0
+                        upgradeCostDiv.textContent = 'FAILED';
+                        upgradeCostDiv.style.color = 'red';
+                    }
+                    
+                    if (currentStreak >= longestStreak) {
+                        longestStreak = currentStreak;
+                        longestStreakSpan.textContent = longestStreak;
+                    }
+                    updateHabit(localId, name, currentStreak, lastClickedTimestamp, isFailed, oldStreak, longestStreak);
+                }
+
+                //Update UI & local data
+                streakCircleSpan.textContent = currentStreak;
+                streakUpgradeButton.textContent = currentStreak;
+                lastClickedTimestamp = today;
+                doneButton.textContent = `Done`;
+                updateHabit(localId, name, currentStreak, lastClickedTimestamp, isFailed, oldStreak, longestStreak);
+                
+                //Sort out button
+                incrementButton.disabled = true;
+                incrementButton.classList.remove('disabled', 'failed');
+                incrementButton.classList.add('done');
+
+
+                updateStreakBar(currentStreak, progressFill);
+                updateTimestamp();
+                updateDailySummary();
+            });
+
+            //Delete button logic
+            deleteBtn.addEventListener('click', () => {
+                if (confirm(`Are you sure you want to delete the habit: "${name}"?`)) {
+                    card.remove();
+                    deleteHabit(localId);
+                    updateTimestamp();
+                    updateDailySummary();
+                }
+            });
+
+            //Append card to habitList container
+            habitList.appendChild(card);
+
+            //If need to save to localStorage
+            if (shouldSave) {
+                if (!id) {
+                    id = generateHabitId();
+                    localId = id;
+                }
+
+                saveHabit(
+                    id, 
+                    name, 
+                    streakValue, 
+                    lastClickedTimestamp, 
+                    isFailed, 
+                    oldStreak,
+                    longestStreak
+                );
+            }
+
+            //Set initial progress bar based on streakValue
+            updateStreakBar(streakValue, progressFill);
+
+            //Update daily summary
+            updateDailySummary();
+            
+            function updateStreakBar(currentStreak, fillEl) {
+                const maxStreak = 10;  //The number the progress bar goes to
+                var streaker = currentStreak % 10;
+                if ((currentStreak % 10 == 0) && (currentStreak > 0)){
+                    streaker = 10;
+                }
+                const percentage = Math.min((streaker / maxStreak) * 100, 100);
+                fillEl.style.width = percentage + '%';
+            }
+        }
+
+        function saveHabit( 
+            id, 
+            name, 
+            streak, 
+            lastClickedTimestamp, 
+            isFailed = false, 
+            oldStreak = null, 
+            longestStreak
+        ) {
+            const storedHabits = JSON.parse(localStorage.getItem('habits')) || [];
+            storedHabits.push({ 
+                id, 
+                name, 
+                streak, 
+                lastClickedTimestamp, 
+                isFailed, 
+                oldStreak, 
+                longestStreak
+            });
+            localStorage.setItem('habits', JSON.stringify(storedHabits));
+        }
+
+        function updateHabit(
+            id, 
+            name, 
+            streak, 
+            lastClickedTimestamp, 
+            isFailed = false, 
+            oldStreak = null, 
+            longestStreak
+        ) {
+            const storedHabits = JSON.parse(localStorage.getItem('habits')) || [];
+            const idx = storedHabits.findIndex(h => h.id === id);
+            if (idx !== -1){
+                storedHabits[idx] = {
+                    id, 
+                    name, 
+                    streak, 
+                    lastClickedTimestamp, 
+                    isFailed, 
+                    oldStreak, 
+                    longestStreak
+                };
+                localStorage.setItem('habits', JSON.stringify(storedHabits));
+            }
+        }
+
+        function deleteHabit(
+            id, 
+            name
+        ) {
+            const storedHabits = JSON.parse(localStorage.getItem('habits')) || [];
+            const updated = storedHabits.filter(h => h.id !== id);
+            localStorage.setItem('habits', JSON.stringify(updated));
+        }
+
+        function getTodayMidnightTimestamp(){
+            const now = getNow();
+            const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            return todayMidnight.getTime();
+        }
+
+        function updateDailySummary(){
+            const storedHabits = JSON.parse(localStorage.getItem('habits')) || [];
+            const today = getTodayMidnightTimestamp();
+
+            const total = storedHabits.length;
+            const doneCount = storedHabits.filter(h => h.lastClickedTimestamp === today).length;
+
+            const dailySummary = document.getElementById('daily-summary');
+            if (total > 0){
+                dailySummary.textContent = `${doneCount} / ${total} habits completed today`;
+            } else {
+                dailySummary.textContent = `No habits yet`;
+            }
+        }
+    </script>
+</body>
+</html>
+
